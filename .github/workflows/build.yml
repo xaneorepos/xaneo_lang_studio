@@ -1,0 +1,300 @@
+name: Build & Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to build (e.g. 1.0.0)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_NAME: xaneo-lang-studio
+  FLUTTER_VERSION: '3.29.0'
+  FLUTTER_CHANNEL: 'stable'
+
+jobs:
+
+# ==========================================================
+#  TEST & ANALYZE
+# ==========================================================
+  analyze-and-test:
+    name: Analyze & Test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies for Linux desktop
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y cmake ninja-build clang pkg-config libgtk-3-dev
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      - name: Flutter Doctor
+        run: flutter doctor -v
+
+      - name: Get Dependencies
+        run: flutter pub get
+
+      - name: Analyze Project
+        run: flutter analyze
+
+      - name: Run Unit & Widget Tests
+        run: flutter test
+
+# ==========================================================
+#  WINDOWS (Portable ZIP with .exe & VC++ Runtimes)
+# ==========================================================
+  build-windows:
+    name: Windows Portable (x64)
+    needs: analyze-and-test
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      - name: Set App Version in pubspec.yaml
+        shell: pwsh
+        run: |
+          $Ver = "${{ github.event.inputs.version }}"
+          if ([string]::IsNullOrWhiteSpace($Ver)) { $Ver = "${{ github.ref_name }}" }
+          $Ver = $Ver.TrimStart("v")
+          if ($Ver -match '^\d+\.\d+') {
+            Write-Host "Setting app version in pubspec.yaml to: $Ver+${{ github.run_number }}"
+            (Get-Content pubspec.yaml) -replace '^version: .*', "version: $Ver+${{ github.run_number }}" | Set-Content pubspec.yaml
+          }
+
+      - run: flutter config --enable-windows-desktop
+      - run: flutter pub get
+      - run: flutter build windows --release
+
+      - name: Bundle VC++ Redistributable DLLs for Portable Release
+        shell: pwsh
+        run: |
+          $ReleaseDir = "build\windows\x64\runner\Release"
+          Copy-Item "C:\Windows\System32\msvcp140.dll" -Destination $ReleaseDir -ErrorAction SilentlyContinue
+          Copy-Item "C:\Windows\System32\vcruntime140.dll" -Destination $ReleaseDir -ErrorAction SilentlyContinue
+          Copy-Item "C:\Windows\System32\vcruntime140_1.dll" -Destination $ReleaseDir -ErrorAction SilentlyContinue
+
+      - name: Package Windows Portable ZIP
+        shell: pwsh
+        run: |
+          $Ver = "${{ github.ref_name }}".TrimStart("v")
+          if ([string]::IsNullOrWhiteSpace($Ver) -or $Ver -eq "main" -or $Ver -eq "master") { $Ver = "1.0.0" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path "build\windows\x64\runner\Release\*" `
+            -DestinationPath "dist\xaneo-lang-studio-$Ver-windows-portable-x64.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable-x64
+          path: dist/*.zip
+          retention-days: 7
+
+# ==========================================================
+#  LINUX — Portable tar.gz & .deb
+# ==========================================================
+  build-linux:
+    name: Linux (x64)
+    needs: analyze-and-test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            cmake ninja-build clang pkg-config \
+            libgtk-3-dev libglib2.0-dev \
+            dpkg-dev fakeroot tar
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      - name: Set App Version in pubspec.yaml
+        run: |
+          VER="${{ github.event.inputs.version }}"
+          if [ -z "$VER" ]; then VER="${{ github.ref_name }}"; fi
+          VER="${VER#v}"
+          if [[ "$VER" =~ ^[0-9]+\.[0-9]+ ]]; then
+            echo "Setting app version in pubspec.yaml to: ${VER}+${{ github.run_number }}"
+            sed -i "s/^version: .*/version: ${VER}+${{ github.run_number }}/" pubspec.yaml
+          fi
+
+      - run: flutter config --enable-linux-desktop
+      - run: flutter pub get
+      - run: flutter build linux --release
+      - run: mkdir -p dist
+
+      - name: Package Linux Portable tar.gz
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ] || [ "$VERSION" = "master" ]; then VERSION="1.0.0"; fi
+          
+          cd build/linux/x64/release/bundle
+          tar -czvf "../../../../../dist/xaneo-lang-studio-${VERSION}-linux-x64.tar.gz" *
+          cd ../../../../../
+
+      - name: Build Debian (.deb) package
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          if ! [[ "$VERSION" =~ ^[0-9] ]]; then VERSION="1.0.0"; fi
+          BUNDLE="build/linux/x64/release/bundle"
+          PKG="dist/deb-build"
+
+          mkdir -p "$PKG/DEBIAN"
+          mkdir -p "$PKG/opt/xaneo-lang-studio"
+          mkdir -p "$PKG/usr/bin"
+          mkdir -p "$PKG/usr/share/applications"
+
+          cp -r "$BUNDLE"/* "$PKG/opt/xaneo-lang-studio/"
+
+          cat << DEBEOF > "$PKG/DEBIAN/control"
+Package: xaneo-lang-studio
+Version: ${VERSION}
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Xaneo Team <dev@xaneo.net>
+Description: Official language pack creation and tuning studio for Xaneo ecosystem.
+DEBEOF
+
+          cat << DESKEOF > "$PKG/usr/share/applications/xaneo-lang-studio.desktop"
+[Desktop Entry]
+Name=Xaneo Lang Studio
+Comment=Xaneo Language Pack Studio
+Exec=/opt/xaneo-lang-studio/xaneo_lang_studio
+Terminal=false
+Type=Application
+Categories=Utility;Development;
+DESKEOF
+
+          ln -sf /opt/xaneo-lang-studio/xaneo_lang_studio "$PKG/usr/bin/xaneo-lang-studio"
+
+          dpkg-deb --build "$PKG" "dist/xaneo-lang-studio-${VERSION}-linux-amd64.deb"
+          rm -rf "$PKG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+          retention-days: 7
+
+# ==========================================================
+#  MACOS — .dmg & .zip
+# ==========================================================
+  build-macos:
+    name: macOS (Universal)
+    needs: analyze-and-test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: ${{ env.FLUTTER_CHANNEL }}
+          cache: true
+
+      - name: Set App Version in pubspec.yaml
+        run: |
+          VER="${{ github.event.inputs.version }}"
+          if [ -z "$VER" ]; then VER="${{ github.ref_name }}"; fi
+          VER="${VER#v}"
+          if [[ "$VER" =~ ^[0-9]+\.[0-9]+ ]]; then
+            echo "Setting app version in pubspec.yaml to: ${VER}+${{ github.run_number }}"
+            sed -i '' "s/^version: .*/version: ${VER}+${{ github.run_number }}/" pubspec.yaml
+          fi
+
+      - run: flutter config --enable-macos-desktop
+      - run: flutter pub get
+      - run: flutter build macos --release
+
+      - name: Package macOS DMG
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "main" ] || [ "$VERSION" = "master" ]; then VERSION="1.0.0"; fi
+          mkdir -p dist
+          hdiutil create \
+            -volname "Xaneo Lang Studio" \
+            -srcfolder "build/macos/Build/Products/Release/xaneo_lang_studio.app" \
+            -ov -format UDZO \
+            "dist/xaneo-lang-studio-${VERSION}-macos.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/xaneo-lang-studio-*-macos.dmg
+          retention-days: 7
+
+# ==========================================================
+#  RELEASE — Automatic GitHub Release
+# ==========================================================
+  release:
+    name: GitHub Release
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-release
+
+      - name: Prepare Release Artifacts Directory
+        run: |
+          mkdir -p release_assets
+          find dist-release -type f \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.deb" -o -name "*.dmg" \) -exec cp {} release_assets/ \;
+          ls -la release_assets
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'v1.0.0' }}
+          name: "Xaneo Lang Studio ${{ github.ref_name }}"
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          generate_release_notes: true
+          files: |
+            release_assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
