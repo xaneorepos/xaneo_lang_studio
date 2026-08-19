@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../models/language_pack.dart';
 
@@ -24,7 +25,7 @@ class ManifestService {
       _rawManifest = jsonDecode(jsonString) as Map<String, dynamic>;
       _parseKeys();
     } catch (e) {
-      print('Failed to load manifest: $e');
+      debugPrint('Failed to load manifest: $e');
     }
   }
 
