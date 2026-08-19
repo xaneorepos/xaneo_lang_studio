@@ -185,25 +185,9 @@ jobs:
 
           cp -r "$BUNDLE"/* "$PKG/opt/xaneo-lang-studio/"
 
-          cat << DEBEOF > "$PKG/DEBIAN/control"
-Package: xaneo-lang-studio
-Version: ${VERSION}
-Section: utils
-Priority: optional
-Architecture: amd64
-Maintainer: Xaneo Team <dev@xaneo.net>
-Description: Official language pack creation and tuning studio for Xaneo ecosystem.
-DEBEOF
+          printf "Package: xaneo-lang-studio\nVersion: %s\nSection: utils\nPriority: optional\nArchitecture: amd64\nMaintainer: Xaneo Team <dev@xaneo.net>\nDescription: Official language pack creation and tuning studio for Xaneo ecosystem.\n" "$VERSION" > "$PKG/DEBIAN/control"
 
-          cat << DESKEOF > "$PKG/usr/share/applications/xaneo-lang-studio.desktop"
-[Desktop Entry]
-Name=Xaneo Lang Studio
-Comment=Xaneo Language Pack Studio
-Exec=/opt/xaneo-lang-studio/xaneo_lang_studio
-Terminal=false
-Type=Application
-Categories=Utility;Development;
-DESKEOF
+          printf "[Desktop Entry]\nName=Xaneo Lang Studio\nComment=Xaneo Language Pack Studio\nExec=/opt/xaneo-lang-studio/xaneo_lang_studio\nTerminal=false\nType=Application\nCategories=Utility;Development;\n" > "$PKG/usr/share/applications/xaneo-lang-studio.desktop"
 
           ln -sf /opt/xaneo-lang-studio/xaneo_lang_studio "$PKG/usr/bin/xaneo-lang-studio"
 
