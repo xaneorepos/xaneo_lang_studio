@@ -27,7 +27,7 @@ concurrency:
 
 env:
   APP_NAME: xaneo-lang-studio
-  FLUTTER_VERSION: '3.29.0'
+  FLUTTER_VERSION: '3.44.4'
   FLUTTER_CHANNEL: 'stable'
 
 jobs:
@@ -98,13 +98,28 @@ jobs:
       - run: flutter pub get
       - run: flutter build windows --release
 
-      - name: Bundle VC++ Redistributable DLLs for Portable Release
+      - name: Bundle VC++ & UCRT Runtime DLLs for Portable Release
         shell: pwsh
         run: |
           $ReleaseDir = "build\windows\x64\runner\Release"
-          Copy-Item "C:\Windows\System32\msvcp140.dll" -Destination $ReleaseDir -ErrorAction SilentlyContinue
-          Copy-Item "C:\Windows\System32\vcruntime140.dll" -Destination $ReleaseDir -ErrorAction SilentlyContinue
-          Copy-Item "C:\Windows\System32\vcruntime140_1.dll" -Destination $ReleaseDir -ErrorAction SilentlyContinue
+          $Dlls = @(
+            "msvcp140.dll",
+            "msvcp140_1.dll",
+            "msvcp140_2.dll",
+            "msvcp140_atomic_wait.dll",
+            "msvcp140_codecvt_ids.dll",
+            "vcruntime140.dll",
+            "vcruntime140_1.dll",
+            "vccorlib140.dll",
+            "concrt140.dll"
+          )
+          foreach ($dll in $Dlls) {
+            $src = "C:\Windows\System32\$dll"
+            if (Test-Path $src) {
+              Copy-Item $src -Destination $ReleaseDir -Force
+              Write-Host "Bundled $dll"
+            }
+          }
 
       - name: Package Windows Portable ZIP
         shell: pwsh
